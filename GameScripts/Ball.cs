@@ -1,150 +1,128 @@
-// Ball.cs
-using System;
-using System.Collections;
 using UnityEngine;
 
-[RequireComponent(typeof(Rigidbody))]
 public class Ball : MonoBehaviour
 {
-    public ThrowType throwType = ThrowType.Basic;
-    public float lifetime = 6f;
-    public float appearInterval = 0.12f;
-    public float initialSpeed = 6f;
+    public System.Action<Ball> OnBallHit;
 
-    // For curve movement
-    private Vector3 curveStart, curveControl, curveEnd;
-    private float curveDuration = 2.5f;
-    private float curveTimer = 0f;
+    private Rigidbody rb;
 
-    Rigidbody rb;
-    MeshRenderer meshRenderer;
-    bool hasBeenHit = false;
-    float spawnTime = 0f;
+    // Shared flight variables
+    private Vector3 startPos;
+    private Vector3 targetPos;
+    private float startTime;
+    private float flightDuration;
+    private float speed;
+    private bool active;
 
-    // Pool callback (set by ThrowManager)
-    public System.Action<GameObject> ReturnToPool;
+    // Curveball vars
+    private bool isCurve;
+    private int oscillations;
+    private float curveAmplitude = 0.5f;
 
-    // Events
-    public event Action<Ball> OnBallHit; // invoked when the ball is hit
+    // Appearing vars
+    private bool isAppearing;
+    private Camera playerCamera;
+    private float blinkInterval;
+    private float nextBlinkTime;
 
     void Awake()
     {
         rb = GetComponent<Rigidbody>();
-        meshRenderer = GetComponentInChildren<MeshRenderer>();
     }
 
-    public void InitAsBasic(Vector3 velocity, float life)
+    // ---- LAUNCH METHODS ----
+
+    public void LaunchStraight(Vector3 target, float speed)
     {
-        throwType = ThrowType.Basic;
-        rb.isKinematic = false;
-        rb.linearVelocity = velocity;
-        lifetime = life;
-        appearInterval = 0f;
-        SetupSpawn();
+        ResetBall(target, speed);
+        isCurve = false;
+        isAppearing = false;
     }
 
-    public void InitAsAppearing(Vector3 velocity, float life, float interval)
+    public void LaunchCurve(Vector3 target, float speed, int oscillations = 2)
     {
-        throwType = ThrowType.AppearingDisappearing;
-        rb.isKinematic = false;
-        rb.linearVelocity = velocity;
-        lifetime = life;
-        appearInterval = interval;
-        StartCoroutine(BlinkRoutine());
-        SetupSpawn();
+        ResetBall(target, speed);
+        isCurve = true;
+        this.oscillations = oscillations;
     }
 
-    public void InitAsCurve(Vector3 start, Vector3 control, Vector3 end, float duration)
+    public void LaunchAppearing(Vector3 target, float speed, Camera cam, float interval = 0.5f)
     {
-        throwType = ThrowType.Curve;
-        rb.isKinematic = true; // we'll move manually
-        curveStart = start;
-        curveControl = control;
-        curveEnd = end;
-        curveDuration = duration;
-        curveTimer = 0f;
-        lifetime = duration;
-        SetupSpawn();
+        ResetBall(target, speed);
+        isAppearing = true;
+        playerCamera = cam;
+        blinkInterval = interval;
+        nextBlinkTime = Time.time + blinkInterval;
     }
 
-    void SetupSpawn()
+    private void ResetBall(Vector3 target, float speed)
     {
-        hasBeenHit = false;
-        spawnTime = Time.time;
-        CancelInvoke(nameof(Expire));
-        Invoke(nameof(Expire), lifetime);
+        startPos = transform.position;
+        targetPos = target;
+        this.speed = speed;
+
+        float distance = Vector3.Distance(startPos, targetPos);
+        flightDuration = distance / speed;
+        startTime = Time.time;
+
+        rb.isKinematic = true; // manual motion
+        active = true;
+
+        isCurve = false;
+        isAppearing = false;
     }
 
-    IEnumerator BlinkRoutine()
-    {
-        while (true)
-        {
-            if (meshRenderer) meshRenderer.enabled = !meshRenderer.enabled;
-            yield return new WaitForSeconds(appearInterval);
-        }
-    }
+    // ---- UPDATE LOOP ----
 
     void Update()
     {
-        if (throwType == ThrowType.Curve && !hasBeenHit)
+        if (!active) return;
+
+        float t = (Time.time - startTime) / flightDuration;
+        if (t >= 1f)
         {
-            curveTimer += Time.deltaTime;
-            float t = Mathf.Clamp01(curveTimer / curveDuration);
-            // Quadratic Bezier
-            Vector3 p0 = curveStart;
-            Vector3 p1 = curveControl;
-            Vector3 p2 = curveEnd;
-            Vector3 pos = (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * p1 + t * t * p2;
-            transform.position = pos;
+            gameObject.SetActive(false);
+            active = false;
+            return;
         }
-    }
 
-    void OnCollisionEnter(Collision collision)
-    {
-        if (hasBeenHit) return;
+        // Default linear movement
+        Vector3 pos = Vector3.Lerp(startPos, targetPos, t);
 
-        if (collision.collider.CompareTag("Bat"))
+        // Curveball offset
+        if (isCurve)
         {
-            hasBeenHit = true;
-            // broadcast hit
-            OnBallHit?.Invoke(this);
-            // optional: add physics response if rb exists
-            if (rb != null && rb.isKinematic == false)
+            float sideOffset = Mathf.Sin(t * Mathf.PI * oscillations) * curveAmplitude;
+            Vector3 right = Camera.main != null ? Camera.main.transform.right : Vector3.right;
+            pos += right * sideOffset;
+        }
+
+        // Appearing behavior
+        if (isAppearing && playerCamera != null)
+        {
+            if (Time.time >= nextBlinkTime)
             {
-                // simple bounce away
-                Vector3 reflect = Vector3.Reflect(rb.linearVelocity, collision.contacts[0].normal);
-                rb.linearVelocity = reflect * 0.6f;
+                float randX = Random.Range(0.2f, 0.8f);
+                float randY = Random.Range(0.2f, 0.8f);
+                Vector3 vp = new Vector3(randX, randY, 5f); // 5m forward
+                pos = playerCamera.ViewportToWorldPoint(vp);
+
+                nextBlinkTime = Time.time + blinkInterval;
             }
-            // schedule return to pool
-            Invoke(nameof(ReturnSelf), 1.0f);
         }
-        else
-        {
-            // hit world / ground => expire sooner
-            if (!hasBeenHit) Invoke(nameof(ReturnSelf), 0.5f);
-        }
+
+        transform.position = pos;
     }
 
-    void Expire()
+    // ---- HIT DETECTION ----
+
+    private void OnTriggerEnter(Collider other)
     {
-        // lifetime expired: notify GameManager indirectly by not firing OnBallHit
-        ReturnSelf();
-    }
-
-    void ReturnSelf()
-    {
-        StopAllCoroutines();
-        // reset appearance
-        if (meshRenderer) meshRenderer.enabled = true;
-        // make sure rb reset
-        if (rb != null)
+        if (other.CompareTag("Bat"))
         {
-            rb.linearVelocity = Vector3.zero;
-            rb.angularVelocity = Vector3.zero;
-            rb.isKinematic = false;
+            OnBallHit?.Invoke(this);
+            gameObject.SetActive(false);
+            active = false;
         }
-        ReturnToPool?.Invoke(this.gameObject);
     }
-
-    public float GetSpawnTime() => spawnTime;
 }
